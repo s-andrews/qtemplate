@@ -1,0 +1,13 @@
+Package: qtemplate
+Title: Create quick standardised quarto template documents
+Version: 0.1.0
+Authors@R: 
+    person("Simon", "Andrews", , "simon.andrews@babraham.ac.uk", role = c("aut", "cre"))
+Description: This package is designed for the Babraham Bioinformatics group but could be adpated elsewhere. It provides a set of standard quarto template documents into which you can substitute some basic information. I will allow you to get a new project off the ground quickly and easily.
+License: GPL (>= 3) + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+Imports: 
+    readr,
+    whisker

@@ -1,0 +1,44 @@
+---
+title: |
+  ![](https://www.bioinformatics.babraham.ac.uk/bioinformatics_logo_quarto.png)<br>
+  {{title}}
+author: "{{author}}"
+format: 
+  html:
+    embed-resources: true
+    toc: true
+    toc-expand: true
+    df-print: paged
+    page-layout: full
+    grid:
+      body-width: 2000px
+      sidebar-width: 0px
+
+---
+
+# Introduction
+
+
+# Setup
+
+We'll just load the packages we are going to use.
+
+```{r}
+#| warning: false
+#| message: false
+library(tidyverse)
+theme_set({{theme}}())
+```
+
+
+# Loading Data
+
+```{r}
+#| warning: false
+#| message: false
+#read_delim("") -> data
+#head(data)
+```
+
+# Data Restructuring
+
