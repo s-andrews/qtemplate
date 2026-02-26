@@ -6,18 +6,20 @@
 #' @param title The title of the document
 #' @param overwrite A logical to say if we should force overwriting if the outfile exists
 #' @param theme Which ggplot theme to install (default theme_bw)
+#' @param code_fold Whether to hide code in compiled documents (default TRUE)
 #'
 #' @returns Nothing, but a new document is created for you
 #' @export
 #'
 #' @examples
-#' new_doc("test.qmd", author="Jane Doe", title="My new analysis", theme="theme_dark")
+#' new_doc("test.qmd", author="Jane Doe", title="My new analysis", theme="theme_dark", code_fold=TRUE)
 new_doc <- function(
     outfile,
     template="babraham_bioinformatics.qmd",
     author="Simon Andrews",
     title="Enter Title Here",
     theme="theme_bw",
+    code_fold=TRUE,
     overwrite=FALSE) {
   template_file <- system.file("extdata",template,package="qtemplate")
 
@@ -52,7 +54,8 @@ new_doc <- function(
   list (
     title = title,
     author = author,
-    theme = theme
+    theme = theme,
+    codefold = dplyr::if_else(code_fold,"true","false")
   ) -> template_vars
 
   whisker::whisker.render(template_string,template_vars) -> filled_template
