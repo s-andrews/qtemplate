@@ -1,0 +1,48 @@
+---
+title: |
+  ![](https://biotrain.tv/static/images/logo_light_background.png)<br>
+  {{title}}
+author: "{{author}}"
+format: 
+  html:
+    embed-resources: true
+    toc: true
+    toc-expand: true
+    code-fold: false
+    df-print: paged
+    page-layout: full
+    grid:
+      body-width: 2000px
+      sidebar-width: 0px
+
+---
+
+# BioTrain.TV: Course Name Exercise Answers
+
+This document contains worked answers to the exercises in the course.
+
+# Setup
+
+We're going to set up our R environment by loading in the packages we're going to use for all of the exercises.  It's good practice to load these at the top of the document to make it clearer which packages are being used.
+
+The order of package loading is important.  Where conflicts arise between functions with the same name imported from different packages then the package which was loaded *last* will win.  It's therefore generally a good idea to put the package you're using most frequently (often tidyverse) at the end.
+
+```{r}
+#| warning: false
+#| message: false
+library(tidyverse)
+theme_set({{theme}}())
+```
+
+
+# Exercises
+
+## Exercise 1
+
+```{r}
+#| warning: false
+#| message: false
+#read_delim("") -> data
+#head(data)
+```
+
