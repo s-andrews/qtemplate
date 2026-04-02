@@ -7,7 +7,7 @@ format:
   html:
     embed-resources: true
     toc: true
-    toc-expand: true
+    toc-expand: 1
     code-fold: false
     df-print: paged
     page-layout: full
