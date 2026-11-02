@@ -18,10 +18,9 @@ format:
 ---
 
 # Introduction
-
+This is where you add a basic description of the analysis you're going to do...
 
 # Setup
-
 We'll just load the packages we are going to use.
 
 ```{r}
@@ -34,12 +33,15 @@ theme_set({{theme}}())
 
 # Loading Data
 
+Load in some data to get started
+
 ```{r}
 #| warning: false
 #| message: false
-#read_delim("") -> data
-#head(data)
+read_delim("") -> data
+head(data)
 ```
 
 # Data Restructuring
 
+Put the data into tidy format...
