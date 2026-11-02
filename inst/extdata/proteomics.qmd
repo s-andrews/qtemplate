@@ -1,0 +1,674 @@
+---
+title: |
+  ![]({{logo}})<br>
+  Whole Proteome Analysis
+author: "{{author}}"
+format: 
+  html:
+    embed-resources: true
+    toc: true
+    toc-expand: 1
+    code-fold: {{codefold}}
+    df-print: paged
+    page-layout: full
+    grid:
+      body-width: 2000px
+      sidebar-width: 0px
+---
+
+
+# Introduction
+This document describes a generic proteomics analysis.  It is designed around a simple whole proteome study with input data coming from a protein level quantitation from either excel or a tab delimited file format such as DIA-NN.
+
+It is *not* expected that you can just put your file name in and the script will run - this is designed to give you pointers to common steps you would use in the analysis, and example code.  You will need to change this code to make it work for you data - we don't know your sample names, experimental design or the question you want to answer.  This is just to help you along the way.
+
+# Setup
+
+We'll start by loading the packages we're going to use.  
+
+* We use tidyverse for generic data manipulation.  
+* We have missForrest for missing value inputation
+* We use LIMMA for Statistics
+* We'll mostly use ggplot2 for graphics, but we can use plotly to make interactive plots
+* We use tidyheatmaps to draw heatmaps
+
+```{r}
+#| warning: false
+#| message: false
+library(limma)
+library(missForrest)
+library(plotly)
+library(tidyheatmaps)
+library(tidyverse)
+theme_set(theme_bw())
+```
+
+
+# Loading Data
+
+We need to load in the quantitative data file we got from our search results.  We're assuming you have protein level data.
+This example would be for a DIA-NN tsv file.  For other formats you may need to used
+
+```readxl::read_excel()```
+
+
+
+```{r}
+#| warning: false
+#| message: false
+read_delim("report.pg_matrix.tsv") -> data
+head(data)
+```
+
+If you have metadata you can also load that.  This would describe the variables in your design and how they link to the samples.
+
+```{r}
+read_tsv("metadata.txt") -> metadata
+
+metadata
+```
+
+
+# Data Restructuring
+
+We need to put the data into a suitable form for analysis.
+
+## Extract Protein Metadata
+
+We'll separate out the information about the protein groups to its own data structure so we can merge it back in selectively later on.  You need to pick out the columns which have relevant protein metadata in them.
+
+```{r}
+data |>
+  select(Protein.Group:N.Proteotypic.Sequences) -> protein_metadata
+```
+
+## Make Tidy Quantitation
+
+We want the main counts to be in tidy (long) format.  Raw counts normally come in a wide format so this restructures the data to the format which tidyverse expects to make later transformations easier.
+
+The only columns we need are the main protein identifier, and then the columns containing the raw quantitations.  Use whatever selctions you need to get these.  You can also clean up the names so they match the names you have in your metadata.  You also need to ensure that the "sample" column name is the same in the metadata and the restructured data.
+
+```{r}
+data |>
+  select(Protein.Group, starts_with("sample")) |>
+  pivot_longer(
+    cols=-Protein.Group,
+    names_to="file",
+    values_to="raw"
+  ) |>
+  mutate(sample = str_replace(file, ".raw$","")) -> data
+
+head(data)
+```
+
+## Clean Metadata
+
+You can clean up the metadata here to remove anything you don't need.  It's also a good idea to create factors from your metadata to define the order that you want to see the samples in later plots.
+
+```{r}
+metadata |>
+  mutate(day = factor(day, levels=c("D0","D1"))) |>
+  mutate(treatment=factor(treatment, levels=c("untreated","treated"))) -> metadata
+
+metadata
+```
+
+# Quality Control
+
+We can now look at the basic properties of the data to see how it looks and whether we need to do any cleaning.
+
+## Check for contaminants
+Often when the searches are run you will have screened against some known contaminants.  You can check if these are still in the data here and we can look at their prevalence in the data overall.
+
+Contaminants are marked in different ways.  Sometimes they will just be sequences from a species other than the one you expect.  Sometimes they will come from a comtaminants database such as cRAP (https://www.thegpm.org/crap/)
+
+```{r}
+protein_metadata |>
+  filter(str_detect(Protein.Names, "cRAP"))
+```
+
+See if you have contaminants in your data.  If you do then you can plot out the proportion of contaminant sequence in each sample.
+
+## Peptides per protein
+
+We will have variable numbers of peptides which were used to identify different proteins.  Let's have a look to see.  We'll aggregate >25 peptides into the 25 group.
+
+```{r}
+protein_metadata |>
+  mutate(N.Sequences = replace(N.Sequences, N.Sequences>25,25)) |>
+  group_by(N.Sequences) |>
+  count(name = "Number_of_Proteins") |>
+  ungroup() |>
+  ggplot(aes(x=N.Sequences, y=Number_of_Proteins)) +
+  geom_col() +
+  scale_x_continuous(breaks=1:25)
+```
+
+See what the spread of numbers of peptides per protein is.
+
+One option would be to remove proteins which are only supported by a single peptide. You don't have to do this but it's a common practice to clean up this type of data.
+
+```{r}
+protein_metadata |>
+  filter(N.Sequences > 1) -> protein_metadata
+
+data |>
+  filter(Protein.Group %in% protein_metadata$Protein.Group) -> data
+```
+
+## Number of observed proteins
+
+Let's check how many observed proteins we have in the data per sample.  You can just plot out the graph of each sample, but here I've also coloured by one metadata variable and facetted by another.  This can be useful to see if something systematic is happening to your number of observations based on an experimental factor.
+
+```{r}
+data |>
+  filter(!is.na(raw)) |>
+  group_by(sample) |>
+  count(name="Measured_Proteins") |>
+  left_join(metadata) |>
+  ggplot(aes(x=sample, y=Measured_Proteins, fill=treatment)) +
+  geom_col(colour="black") +
+  facet_grid(cols=vars(day), scale="free_x") +
+  scale_fill_manual(values=c("magenta2","green3"))
+```
+
+See if you have consistent levels of observation in all of your samples.
+
+
+## Numbers of samples per protein
+
+Let's see how many proteins are measured consistently across samples.  We're looking to see if we see the same proteins everywhere, or if there might be subsets of samples where larger numbers of proteins systematically disappear.
+
+```{r}
+data |>
+  filter(!is.na(raw)) |>
+  group_by(Protein.Group) |>
+  count(name="Number_of_Samples") |>
+  group_by(Number_of_Samples) |>
+  count(name="Number_of_Proteins") |>
+  ungroup() |>
+  ggplot(aes(x=Number_of_Samples, y=Number_of_Proteins)) +
+  geom_col(colour="black",fill="orange")
+```
+
+Very often you'll see that most proteins are observed in all samples, but that some are missing in one or two samples.  In more structured experiments you might see a secondary peak which would represent proteins which were systematically missing from one (or more) of your experimental conditions.
+
+We can use a heatmap to look at which combinations of samples commonly account for the incompletely measured proteins. 
+
+```{r}
+#| fig-width: 4
+#| fig-height: 8
+data |>
+  filter(!is.na(raw)) |>
+  group_by(Protein.Group) |>
+  filter(n() != nrow(metadata)) |>
+  ungroup() |>
+  select(Protein.Group, sample) |>
+  add_column(seen=1) |>
+  complete(Protein.Group, sample) |>
+  mutate(seen=replace_na(seen,0)) |>
+  left_join(metadata) |>
+  tidyheatmaps::tidy_heatmap(
+    rows=Protein.Group, 
+    columns = SampleNo,
+    values = seen,
+    cluster_cols = TRUE,
+    cluster_rows = TRUE,
+    scale="none",
+    colors = c("white","black"),
+    show_rownames = FALSE,
+    annotation_col = c(day,treatment)
+  )
+```
+
+You'll see if there are proteins which link to a particular condition, or if there are individual samples with higher/lower levels of observation.
+
+
+## Intensity vs Dropout
+
+It can be useful to see if, when things drop out, it's because that protein is generally lowly observed where it is seen. If this is the case then we are likly looking at stochastic dropout, but if you see a bimodal distribution then it's likely that there is a systematic change in protein expression level which is contributing to the level of dropout.
+
+
+```{r}
+data |>
+  group_by(Protein.Group) |>
+  summarise(
+    Measured_Samples = sum(!is.na(raw)),
+    Average_Signal = mean(log2(raw[!is.na(raw)]))
+  ) |>
+  ggplot(aes(x=Measured_Samples, y=Average_Signal, group=Measured_Samples)) +
+  geom_jitter(width=0.3, colour="grey") +
+  geom_violin(alpha=0) +
+  scale_x_continuous(breaks=1:nrow(metadata))
+```
+
+You should see that the proteins which are completely observed have higher levels of expression, but it's the structure of the rest of the expression levels which is interesting.
+
+
+## Filtering unmeasured
+
+Now you can filter the proteins to remove those you believe don't have enough observations.  You have different choices for this.
+
+1. Leave everything in - not generally a good idea as you'll have proteins which are just seen in a single sample, and these will be unreliable to measure.
+2. Only keep proteins observed everwhere - this is a valid option if you have good, consistent measurements for most proteins, and avoids the need to impute missing values.
+3. Allow a few dropouts.  If you have good consistent measurements then you can allow for a few dropouts to increase your total protein count, and impute the missing values
+4. Filter on systematic dropout.  You could (for example) keep all proteins which are observed in all of the replicates of any condition in your experiment, even if that means that there might be a lot of dropouts in other conditions.
+
+We'll look at an example of filtering for presence in all replicates of one condition.  The code below only works if you have the same (in this case 3) number of replicates for each condition.
+
+```{r}
+data |>
+  filter(!is.na(raw)) |>
+  left_join(metadata |> unite(condition,day,treatment)) |>
+  group_by(Protein.Group,condition) |>
+  filter(n() == 3) |>
+  ungroup() |>
+  distinct(Protein.Group) -> measured_proteins
+
+nrow(protein_metadata)
+nrow(measured_proteins)
+```
+
+You can see how many proteins were removed by this step.
+
+Now you can apply the filtered set to the whole data.
+
+```{r}
+data |>
+  filter(Protein.Group %in% measured_proteins$Protein.Group) -> data
+
+protein_metadata %>%
+  filter(Protein.Group %in% measured_proteins$Protein.Group) -> protein_metadata
+```
+
+# Normalisation
+
+Let's have a look at the quantitative values supplied.  Often we can use the originally reported values directly without the need for further normalisation but it's worth checking.
+
+## Log transformation
+
+All proteomics data is better viewed on a log scale so let's do that first.
+
+```{r}
+data |>
+  mutate(lograw=log2(raw)) -> data
+```
+
+## Check existing normalisation
+
+### Normalisation Curves
+
+Let's draw out the curves for the different samples.  You can choose to colour by an experimental parameter.
+
+```{r}
+data |>
+  filter(!is.na(raw)) |>
+  arrange(lograw) |>
+  group_by(sample) |>
+  mutate(percent=100*1:n()/n()) |>
+  ungroup() |>
+  left_join(metadata) |>
+  ggplot(aes(x=index,y=lograw, group=sample, colour=day)) +
+  geom_line()
+```
+
+Do the lines overlap well?
+
+### Boxplots / Violin Plots
+Boxplots or violin plots are also commonly used to check normalisation
+
+```{r}
+data |>
+  filter(!is.na(raw)) |>
+  left_join(metadata) |>
+  ggplot(aes(x=sample, y=lograw, fill=day)) +
+  geom_boxplot()
+```
+
+# Imputation
+
+If you've chosen to leave in some proteins which are not measured in all samples then we're going to impute the missing values to give us a complete quantitative dataset suitable for LIMMA based statistics.
+
+## Running Imputation
+Because imputation is slow, we save and then reload the results.  This means that after doing it once you can comment out the actual imputation and just reload the saved data to save time.
+
+```{r}
+data |>
+  select(Protein.Group, sample, lograw) |>
+  pivot_wider(
+    names_from=sample,
+    values_from=lograw
+  ) |>
+  column_to_rownames(var="Protein.Group") |>
+  missForest() -> imputed
+
+imputed$ximp |>
+  as_tibble(rownames="Protein.Group") |>
+  pivot_longer(
+    cols=-Protein.Group,
+    names_to="sample",
+    values_to="logimp"
+  ) -> imputed
+
+imputed |>
+  write_csv("imputed_data.csv")
+```
+
+```{r}
+#| message: false
+#| warning: false
+
+read_delim("imputed_data.csv") -> imputed
+
+data |>
+  left_join(imputed) -> data
+```
+
+## Visualising Imputed Data
+
+It can be interesting to check the imputed values in each sample against the values seen for non-missing measures for the same protein across all samples.
+
+```{r}
+data |>
+  group_by(Protein.Group) |>
+  mutate(av_lograw = mean(lograw, na.rm=TRUE)) |>
+  ungroup() |>
+  group_by(sample, Protein.Group) |>
+  filter(any(is.na(lograw))) |>
+  ungroup() |>
+  ggplot(aes(x=av_lograw, y=logimp)) +
+  geom_point(pch=21,size=1, fill="red2") +
+  geom_abline(slope=1, intercept=0, colour="blue") +
+  facet_wrap(
+    vars(sample),
+    ncol=4
+  )
+```
+
+The imputed values should generally sit a bit below the blue diagonal line.
+
+# Clustering
+
+Let's run a PCA to see the relationship between your samples.
+
+```{r}
+data |>
+  select(Protein.Group, sample, logimp) |>
+  pivot_wider(
+    names_from=Protein.Group,
+    values_from=logimp
+  ) |>
+  column_to_rownames(var=sample") |>
+  prcomp() -> pca_results
+```
+
+## Elbow Plot
+
+How well does the PCA summarise the data?
+
+```{r}
+summary(pca_results)$importance |>
+  t() |>
+  as_tibble(rownames="PC") |>
+  mutate(Percent_Variance=100*`Proportion of Variance`) |>
+  mutate(PC = factor(PC, levels=PC)) |>
+  ggplot(aes(x=PC, y=Percent_Variance)) +
+    geom_col(colour="black", fill="orange")
+```
+
+See how many PCs contain substantial proportions of your overall variance.
+
+You can now plot out the PCA plots for the PCs which seem to contain useful levels of signal.  Use different aesthetics to represent the different factors in your design.
+
+## PC1 vs PC2
+
+```{r}
+#| fig-width: 5
+#| fig-height: 4
+pca_results$x |>
+  as_tibble(rownames="sample") |>
+  left_join(metadata) |>
+  ggplot(aes(x=PC1, y=PC2, shape=treatment, fill=day)) +
+  geom_point(size=4) +
+  scale_shape_manual(values=21:22) +
+  guides(
+    fill = guide_legend(
+      override.aes = list(shape = 21)
+    )
+  )
+```
+
+PCs 1 and 2 should always be informative.  Other later PCs may not.
+
+## PC3 vs PC4
+
+```{r}
+#| fig-width: 5
+#| fig-height: 4
+pca_results$x |>
+  as_tibble(rownames="sample") |>
+  left_join(metadata) |>
+  ggplot(aes(x=PC3, y=PC4, shape=treatment, fill=day)) +
+  geom_point(size=4) +
+  scale_shape_manual(values=21:22) +
+  guides(
+    fill = guide_legend(
+      override.aes = list(shape = 21)
+    )
+  )
+```
+
+You can go on to look at as many PCs as you think are worth it.
+
+If your design is more complex you could use a non-linear method such as tSNE or UMAP to summarise the relationship between samples.
+
+# Scatterplots
+
+Use pairwise scatterplots to compare the overall effect of treatments, or to look in more detail at the behaviour of individual samples which looked odd in the PCA.
+
+## Make per condition average data
+
+```{r}
+data |>
+  left_join(metadata) |>
+  group_by(day,treatment, Protein.Group) |>
+  summarise(logimp = mean(logimp)) |>
+  ungroup() -> per_condition
+```
+
+## D0 vs D3
+
+This would compare two untreated timepoints.  Here we're making a static image but adding labels to the 20 proteins with the largest changes.
+
+```{r}
+#| fig-width: 5
+#| fig-height: 5
+per_condition |>
+  filter(treatment == "untreated") |>
+  filter(day %in% c("D0","D3")) |>
+  pivot_wider(
+    names_from=day,
+    values_from=logimp
+  ) |>
+  left_join(protein_metadata) |>
+  ggplot(aes(x=D0, y=D3, label=Genes)) +
+  geom_point(colour="grey") +
+  geom_abline(slope=1, intercept=c(0)) +
+  ggrepel::geom_text_repel(data = . %>% arrange(desc(abs(D0-D3))) %>% slice(1:20), size=3)
+```
+
+
+## D3 Untreated vs Treated
+
+Here we're comparing treated vs untreated for one of the days.  This time we're making an interactive plot you can hover your mouse over to see what each point is.
+
+```{r}
+#| fig-width: 5
+#| fig-height: 5
+per_condition |>
+  filter(day == "D3") |>
+  pivot_wider(
+    names_from=treatment,
+    values_from=logimp
+  ) |>
+  left_join(protein_metadata) |>
+  ggplot(aes(x=untreated, y=treated, label=Genes)) +
+  geom_point(colour="grey") +
+  geom_abline(slope=1, intercept=c(0)) -> plot
+
+ggplotly(plot)
+
+```
+
+
+# Statistics
+
+The statitics you use here will depend on your experimental design and the question you want to answer.  If you have a simple 2-condition experiment then this is all pretty easy, but if you have multiple conditions and want to look at the interactions between them then you'd want to build a more complex model.
+
+## Variance calculation
+
+LIMMA uses a noise model which wants to use a metric to find proteins with similar levels of variance.  By default it uses the magnitude of your signal to predict this, but people also commonly use the number of peptides used to create the measurement.  We're going to plot the relationship between these metrics to see which is appropriate for your data.
+
+
+## Calculate variance per Protein
+
+We'll calculate the average variance across Proteins in the same biological condition and we'll annotate this with the number of peptides used and the mean signal.
+
+```{r}
+data |>
+  left_join(metadata) |>
+  group_by(Protein.Group, day, treatment) |>
+  summarise(
+    stdev = sd(logimp),
+    signal=mean(logimp)
+  ) |>
+  ungroup() |>
+  left_join(protein_metadata |> select(Protein.Group, N.Sequences)) -> variance_data
+```
+
+## Plot variance vs signal
+
+```{r}
+variance_data |>
+  ggplot(aes(x=signal,y=stdev)) +
+  geom_point(colour="grey", size=1) +
+  geom_smooth(colour="black", fill=NA) +
+  coord_cartesian(ylim=c(0,1))
+```
+
+Do you see a clear negative correlation?
+
+## Plot variance vs number of peptides
+
+```{r}
+variance_data |>
+  mutate(N.Sequences = replace(N.Sequences, N.Sequences>20,20)) |>
+  ggplot(aes(x=N.Sequences, y=stdev)) +
+  geom_jitter(colour="grey", size=1) +
+  stat_summary(geom="crossbar", fun=mean) +
+  coord_cartesian(ylim=c(0,1)) +
+  scale_x_continuous(breaks=1:20)
+```
+
+Does this look better, worse or about the same?  Using the signal intensity is the default in LIMMA, so it's only if the number of peptides is a better predictor that you'd want to use that instead.
+
+## Time stats
+
+We can do a test on the two timepoints.
+
+```{r}
+metadata |>
+  filter(treatment=="untreated") |>
+  arrange(day, sample) |>
+  select(-treatment) |>
+  column_to_rownames(var="sample") -> limma_metadata
+
+data |>
+  filter(sample %in% rownames(limma_metadata)) |>
+  select(Protein.Group, sample, logimp) |>
+  pivot_wider(
+    names_from=SampleNo,
+    values_from=logimp
+  ) |>
+  column_to_rownames(var="Protein.Group") -> limma_data
+
+limma_data[,rownames(limma_metadata)] -> limma_data
+
+model.matrix(data=limma_metadata, ~day) -> limma_design
+
+lmFit(limma_data, limma_design) -> limma_fit
+
+eBayes(limma_fit) -> limma_fit
+
+topTable(
+  limma_fit,
+  number=Inf
+)  |>
+  as_tibble(rownames="Protein.Group") |>
+  left_join(protein_metadata) |>
+  select(Protein.Group, Genes, everything()) |>
+  arrange(P.Value) -> timecourse_limma_results
+
+timecourse_limma_results |> 
+  filter(adj.P.Val < 0.05 & abs(log2FoldChange)>1 )
+```
+
+You have the values for all proteins, but you can list those with significant changes above 2-fold here.
+
+### Heatmap
+
+A heatmap is a nice way to view the results and see the consistency between replicates.
+
+```{r}
+#| fig-width: 4
+#| fig-height: 7
+timecourse_limma_results |> 
+  filter(adj.P.Val < 0.05 & abs(log2FoldChange)>1) |>
+  select(Protein.Group) |>
+  inner_join(data) |>
+  left_join(metadata) |>
+  filter(treatment=="untreated") |>
+  left_join(protein_metadata) |>
+  arrange(day) |>
+  tidy_heatmap(
+    rows=Genes,
+    columns=sample,
+    values=logimp,
+    scale="row",
+    cluster_rows=TRUE,
+    cluster_cols=FALSE,
+    annotation_col=day,
+    gaps_col = day,
+    show_rownames=FALSE,
+    colors = c("magenta2","black","green3"),
+    color_legend_min = -1.5,
+    color_legend_max = 1.5,
+    cutree_rows = 2
+  ) -> timecourse_heatmap
+  
+```
+
+You should see the hits showing consistent changes between conditions.
+
+
+# Export
+
+It's a good idea to export the data from your normalisation and analysis so it's easy to re-use in subsequent analyses.
+
+```{r}
+data |>
+  write_csv("Exported_Data/quantitated_data.csv")
+
+metadata |>
+  write_csv("Exported_Data/metadata.csv")
+
+protein_metadata |>
+  write_csv("Exported_Data/protein_metadata.csv")
+
+timecourse_limma_results |>
+  write_csv("Exported_Data/timecourse_limma_results.csv")
+```
+
+
+
+
